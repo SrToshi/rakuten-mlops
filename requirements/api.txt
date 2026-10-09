@@ -1,0 +1,28 @@
+# API + training service.
+#
+# Pinned around TensorFlow 2.13, which constrains protobuf (<5) and
+# typing_extensions (<4.6). Only mlflow-skinny (the MLflow CLIENT) can live
+# here: the full mlflow package pulls SQLAlchemy and Alembic, which require a
+# newer typing_extensions and therefore cannot share an environment with this
+# TensorFlow. The tracking SERVER runs in its own container.
+tensorflow==2.13.0
+keras==2.13.1
+numpy==1.24.3
+pandas==2.0.3
+scikit-learn==1.3.0
+scipy==1.11.1
+nltk==3.8.1
+beautifulsoup4==4.12.2
+Pillow==10.0.0
+protobuf==4.23.4
+typing_extensions==4.5.0
+
+fastapi==0.95.2
+pydantic==1.10.13
+starlette==0.27.0
+uvicorn==0.22.0
+prometheus-client==0.21.0
+
+mlflow-skinny==2.16.2
+databricks-sdk==0.40.0
+requests==2.31.0

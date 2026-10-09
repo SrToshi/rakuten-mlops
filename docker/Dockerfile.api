@@ -1,0 +1,45 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# libgomp1 is needed by TensorFlow's threading runtime; the rest keeps the
+# image from pulling a full build toolchain.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements/api.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# NLTK corpora are downloaded at build time so the container does not reach
+# the network on its first request.
+RUN python -m nltk.downloader -d /usr/share/nltk_data punkt stopwords wordnet
+ENV NLTK_DATA=/usr/share/nltk_data
+
+COPY src/ ./src/
+
+ENV PYTHONPATH=/app/src \
+    PYTHONUNBUFFERED=1
+
+EXPOSE 8000
+
+# The API loads both Keras branches before uvicorn opens the port. Until that
+# finishes there is nothing listening, so the check is refused instantly —
+# "Failed to connect to 127.0.0.1 port 8000 after 0 ms" — rather than timing
+# out. Measured on a four-core host under load: roughly eight minutes from
+# container start to the port opening. 300s was not enough; the first failure
+# landed at 5m06s, five of them turned the container unhealthy, and the API
+# answered 200 from the host a minute later. 600s covers the observed case
+# with margin.
+#
+# The timeout is separate and stays wide: once serving, this container may be
+# sharing the host with a retrain, and a healthy service that answers slowly
+# must not be recorded as a failure.
+#
+# 127.0.0.1, not localhost: uvicorn binds 0.0.0.0, which is IPv4 only. Where
+# localhost resolves to ::1 first, the check would be refused against a server
+# that is listening — the same symptom as a slow boot, from a different cause.
+HEALTHCHECK --interval=30s --timeout=20s --start-period=600s --retries=5 \
+    CMD curl -fsS http://127.0.0.1:8000/health || exit 1
+
+CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000", "--app-dir", "src"]

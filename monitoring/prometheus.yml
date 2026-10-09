@@ -1,0 +1,21 @@
+# Prometheus scrape configuration for the Rakuten stack.
+#
+# Only the API is scraped. The drift job is a batch process that exits, so it
+# cannot be scraped; it writes its summary to the database instead, and the
+# API turns that into gauges at scrape time.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: rakuten-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:8000"]
+        labels:
+          service: rakuten-api
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

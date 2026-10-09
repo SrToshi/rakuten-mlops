@@ -1,0 +1,228 @@
+# Rakuten MLOps stack.
+#
+#   docker compose up -d --build
+#
+#   API        http://localhost:8000/docs
+#   Streamlit  http://localhost:8501
+#   MLflow     http://localhost:5000
+#   Airflow    http://localhost:8080   (admin / admin)
+#   Prometheus http://localhost:9090
+#   Grafana    http://localhost:3000   (admin / admin)
+#
+# On a host where `localhost` resolves to the IPv6 ::1 before the IPv4
+# 127.0.0.1 — the default on Windows — one of these can answer nothing while
+# the container is perfectly healthy, because the server inside listens on
+# IPv4 only. Substituting 127.0.0.1 in the URL is the whole fix. Observed on
+# port 5000 and nowhere else, which is why it is a note and not a change.
+#
+# The split into services is not decoration. The MLflow server needs
+# SQLAlchemy and Alembic, which require a newer typing_extensions than
+# TensorFlow 2.13 allows; Evidently brings its own web framework. These
+# dependency sets genuinely cannot share one Python environment, so each
+# runs in its own image and they talk over HTTP and a shared volume.
+
+# Docker's default json-file driver does not rotate. A training run logs a
+# Keras progress bar — one line per refresh, tens of thousands of lines an
+# hour — straight into it, and the file grows until the disk is full. Nothing
+# warns you; the stack simply stops being able to write. Capped here.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.16.2
+    container_name: rakuten-mlflow
+    logging: *default-logging
+    restart: unless-stopped
+    # `mlflow server` runs on gunicorn under the hood, whose default
+    # per-worker timeout is 30s. Streaming a large artifact (the VGG16
+    # weights, several MB) through the --serve-artifacts proxy on a
+    # resource-constrained host can take longer than that, so gunicorn
+    # kills the worker mid-transfer: the client sees a 500 injected into
+    # the middle of a chunked response. Observed directly: downloading
+    # champion artifacts failed at exactly the 30s mark, on the largest
+    # file, every time — hence --gunicorn-opts below.
+    command: >
+      mlflow server
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --artifacts-destination /mlflow/artifacts
+      --serve-artifacts
+      --host 0.0.0.0
+      --port 5000
+      --gunicorn-opts "--timeout 300"
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow-store:/mlflow
+    healthcheck:
+      # The image has no curl; Python is guaranteed to be there.
+      test: ["CMD", "python", "-c",
+             "import urllib.request;urllib.request.urlopen('http://127.0.0.1:5000/health')"]
+      interval: 30s
+      timeout: 15s
+      retries: 6
+      start_period: 60s
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: rakuten-api
+    logging: *default-logging
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_EXPERIMENT: rakuten-classification
+      MLFLOW_MODEL_NAME: rakuten-fusion
+      RAKUTEN_DB_PATH: /app/data/rakuten.db
+      RAKUTEN_CHAMPION_DIR: /app/models/champion
+      RAKUTEN_MAX_PREDICT_ROWS: "200"
+    volumes:
+      # Data and images stay on the host: ~2.4 GB of JPEGs has no business
+      # inside an image.
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+    depends_on:
+      mlflow:
+        condition: service_healthy
+
+  streamlit:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.streamlit
+    container_name: rakuten-streamlit
+    logging: *default-logging
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    environment:
+      # Service names inside the compose network; the Grafana and MLflow
+      # links are rendered for the browser, so they use localhost.
+      RAKUTEN_API_URL: http://api:8000
+      MLFLOW_UI_URL: http://localhost:5000
+      GRAFANA_URL: http://localhost:3000
+      AIRFLOW_URL: http://localhost:8080
+    depends_on:
+      - api
+
+  drift:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.drift
+    container_name: rakuten-drift
+    logging: *default-logging
+    restart: unless-stopped
+    ports:
+      - "8100:8100"
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_DRIFT_EXPERIMENT: rakuten-drift
+      RAKUTEN_DB_PATH: /app/data/rakuten.db
+      RAKUTEN_REPORTS_DIR: /app/reports/drift
+      # Share of monitored columns above which the DAG retrains.
+      RAKUTEN_DRIFT_THRESHOLD: "0.5"
+    volumes:
+      - ./data:/app/data
+      - ./reports:/app/reports
+    depends_on:
+      mlflow:
+        condition: service_healthy
+
+  airflow:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.airflow
+    container_name: rakuten-airflow
+    logging: *default-logging
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # Where the DAGs send their work. Airflow orchestrates over HTTP and
+      # computes nothing itself, so this image needs neither TensorFlow nor
+      # Evidently — see docker/Dockerfile.airflow.
+      RAKUTEN_API_URL: http://api:8000
+      RAKUTEN_DRIFT_URL: http://drift:8100
+      DRIFT_REFERENCE_LIMIT: "1000"
+      DRIFT_CURRENT_LIMIT: "500"
+      AIRFLOW_ADMIN_USER: admin
+      AIRFLOW_ADMIN_PASSWORD: admin
+      # Keep the metadata database on a volume, not in the container. See
+      # docker/Dockerfile.airflow for what is lost otherwise.
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/db/airflow.db
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "True"
+      # The webserver's first boot syncs Flask-AppBuilder's permission tables
+      # (one-time cost — hundreds of inserts, logged as "Added Permission ...").
+      # On a two-core host running six other containers at once, that can
+      # outrun gunicorn's master timeout, which kills the container before it
+      # ever gets a chance to serve a page. Fewer workers means fewer
+      # processes competing for those same cores.
+      #
+      # 300 was the first attempt and was not enough. With a retrain running
+      # inside the api container, the host was starved badly enough that the
+      # scheduler logged "Heartbeat recovered after 41.33 seconds" and the
+      # webserver then exited 1 with "No response from gunicorn master within
+      # 300 seconds". Not an Airflow bug and not memory (OOMKilled was false):
+      # the supervisor gave up on a master that was merely waiting for CPU.
+      # 900 buys enough room for the worst case observed.
+      AIRFLOW__WEBSERVER__WEB_SERVER_MASTER_TIMEOUT: "900"
+      # One worker, not two. The SequentialExecutor runs one task at a time
+      # and the UI has a single viewer, so the second worker bought nothing
+      # and doubled the boot work on the scarcest resource.
+      AIRFLOW__WEBSERVER__WORKERS: "1"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags:ro
+      - airflow-data:/opt/airflow/logs
+      - airflow-db:/opt/airflow/db
+    depends_on:
+      - api
+      - drift
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: rakuten-prometheus
+    logging: *default-logging
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      - api
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: rakuten-grafana
+    logging: *default-logging
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+volumes:
+  mlflow-store:
+  airflow-db:
+  prometheus-data:
+  grafana-data:
+  airflow-data:

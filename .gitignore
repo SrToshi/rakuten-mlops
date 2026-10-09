@@ -1,0 +1,145 @@
+#deep learning models
+*.h5
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# DotEnv configuration
+.env
+
+# Database
+*.db
+*.rdb
+
+# Pycharm
+.idea
+
+# VS Code
+.vscode/
+
+# Spyder
+.spyproject/
+
+# Jupyter NB Checkpoints
+.ipynb_checkpoints/
+
+# exclude data from source control by default — except the DVC pointers.
+#
+# The .dvc files are a few hundred bytes each and they ARE the record of which
+# data version a training run used: without them in the repository, a teammate
+# who clones has nothing to `dvc pull` with, and the hashes in MLflow point at
+# nothing they can retrieve.
+#
+# Four lines rather than one, because git cannot re-include a file whose parent
+# directory is excluded. `/data/` plus `!data/preprocessed/*.dvc` silently does
+# nothing: the negation never gets a chance to match. Each level has to be
+# re-included on the way down.
+/data/*
+!/data/preprocessed/
+/data/preprocessed/*
+!/data/preprocessed/*.dvc
+
+# Mac OS-specific storage files
+.DS_Store
+
+# vim
+*.swp
+*.swo
+
+# Mypy cache
+.mypy_cache/
+
+# Log files
+/logs/
+
+# Artifacts
+# /models/
+
+# MLflow local store (the tracking server owns this, not Git)
+mlruns/
+mlflow.db
+
+# Model artifacts downloaded from the registry at serving time
+models/champion/
+
+# Evidently reports
+reports/drift/
+
+# DVC, initialised with --no-scm (see scripts/setup_dvc.sh).
+#
+# That flag is what the brief asks for, and it has a consequence worth
+# knowing: with --no-scm, DVC does NOT write the .gitignore files it
+# normally drops beside its cache and its tracked data. Nothing here is
+# automatic, so these entries are hand-written.
+#
+# The cache holds a full copy of every tracked file — adding the training
+# images would put ~2.4 GB in it. The .dvc pointer files themselves are
+# small, but they live under /data/, which is already ignored above.
+.dvc/cache/
+.dvc/tmp/
+
+# A remote's credentials. `dvc remote modify --local` writes the token here in
+# plain text, which is exactly why it is a separate file from .dvc/config —
+# and exactly why it must never be committed. With git, `dvc init` would have
+# written this ignore itself; with --no-scm it writes nothing, so it is here.
+.dvc/config.local
+
+# The DVC tooling lives in its own environment: dvc 3.x upgrades
+# typing_extensions past the < 4.6 that TensorFlow 2.13 pins, so it must
+# never share the training environment.
+.venv-dvc/

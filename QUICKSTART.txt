@@ -1,0 +1,516 @@
+===============================================================================
+RAKUTEN MLOPS - RUNNING THE STACK FROM A FRESH FORK
+===============================================================================
+
+Written for someone who has just forked or cloned this repository and has
+never run it. Every command here was executed on a real machine while this
+file was being written; nothing is from memory.
+
+Read section 0 before starting. It is short, and it is the part that saves
+you an afternoon.
+
+Commands are given for Windows (cmd). On Linux or macOS the differences are
+noted inline: `curl` instead of `curl.exe`, `export` instead of `set`, and
+forward slashes in paths.
+
+
+-------------------------------------------------------------------------------
+0. WHAT YOU GET, AND WHAT YOU DO NOT
+-------------------------------------------------------------------------------
+
+A clone gives you the code, the configuration and the documentation. It does
+NOT give you a working prediction service, and that is deliberate.
+
+Three things are missing on purpose, and each has a step below that supplies
+it:
+
+  * THE DATA. 98,728 product rows and 84,916 training images, about 2.4 GB.
+    Git is not for that. What ships instead are DVC pointer files
+    (data/preprocessed/*.dvc): a few hundred bytes each, holding the md5 of
+    the exact dataset version. Step 4 turns those pointers back into data.
+
+  * THE TRAINED MODEL. `*.h5` is in .gitignore, so the Keras weights are not
+    here. What ships is models/best_weights.json, models/mapper.json and
+    models/tokenizer_config.json - the small artifacts that accompany a
+    model, not the model.
+
+  * THE MLFLOW REGISTRY. mlruns/ and mlflow.db are ignored too, so there is
+    no experiment history and no registered champion. The API resolves the
+    model it serves from the registry at startup; on a fresh clone there is
+    nothing there to resolve.
+
+The practical consequence, stated plainly because it surprises people:
+
+    A FRESHLY CLONED STACK STARTS CLEANLY AND CANNOT PREDICT ANYTHING UNTIL
+    YOU HAVE TRAINED ONCE.
+
+That is not a defect. Model binaries do not belong in Git, and a registry is
+state, not source. But it means your first run has a step your daily work
+will not have. Step 7 is that step, and it takes about fifteen minutes.
+
+
+-------------------------------------------------------------------------------
+1. PREREQUISITES
+-------------------------------------------------------------------------------
+
+1.1  WHAT YOU NEED INSTALLED
+
+     Docker Desktop, with the engine running.
+     Git.
+
+     That is the whole list for sections 2 to 8. You do NOT need conda,
+     TensorFlow, or a Python machine-learning environment: training happens
+     inside a container that already has them.
+
+     Two later steps use Python, each in a throwaway virtual environment of
+     its own that never touches anything else you have installed:
+
+       - Section 3 (the tests) needs PYTHON 3.8 TO 3.11. Not newer. The
+         pinned pandas 2.0.3 and numpy 1.24.3 publish wheels only up to
+         cp311; on 3.12 or 3.13 pip falls back to building from source and
+         fails with "Failed to build 'pandas'". Verified: the same suite
+         that fails to install on 3.13 installs and runs on 3.11.
+
+       - Section 4 (the data) needs any modern Python for DVC. 3.14 works.
+
+     Versions this was verified against:
+
+         docker          29.2.1
+         docker compose  v5.1.0
+         git             2.55.0.windows.3
+
+     Older versions are likely fine. Compose must be v2 or newer, i.e. the
+     `docker compose` subcommand rather than the separate `docker-compose`
+     executable, because this stack uses `depends_on` with health conditions
+     and YAML anchors.
+
+1.2  WHAT THE MACHINE NEEDS
+
+     Check what Docker actually has, which is not the same as what the
+     machine has:
+
+         docker info --format "CPUs={{.NCPU}} RAM={{.MemTotal}}"
+
+     Verified working on:
+
+         CPUs=4  RAM=6175334400     (5.75 GB)
+
+     Seven containers plus a training run fit in that, but not comfortably.
+     If you have less, raise Docker Desktop's memory limit under
+     Settings -> Resources before going further. Most of the slowness
+     described later in this file is this number.
+
+     Disk: about 12 GB. Roughly 2.4 GB of data, 2.4 GB again in the DVC
+     cache, and the rest in container images.
+
+1.3  ONE SETTING THAT SAVES CONFUSION
+
+         set COMPOSE_PROGRESS=plain
+
+     Compose draws its progress with cursor-control codes. Some terminals -
+     notably the one built into VS Code - never repaint the final line, so a
+     command that has already finished looks frozen, and people interrupt it.
+     Interrupting a Compose command halfway leaves half-created containers.
+
+     This setting makes Compose print plain lines instead. Run it once per
+     terminal, or `setx COMPOSE_PROGRESS plain` to make it permanent for your
+     user (new terminals only).
+
+     Related, and worth knowing before it happens to you: `docker compose
+     up -d` DOES NOT return immediately. Services declared with
+     `condition: service_healthy` make Compose wait for MLflow's healthcheck
+     before starting the services that depend on it. Several minutes of
+     apparent silence is normal. It is not a hang.
+
+
+-------------------------------------------------------------------------------
+2. CLONE
+-------------------------------------------------------------------------------
+
+         git clone https://github.com/SrToshi/rakuten-mlops.git
+         cd rakuten-mlops
+
+     The whole repository is about 2.6 MB. If that seems small for a machine
+     learning project, section 0 is why.
+
+     Confirm you got what you should have, and did not get what you should
+     not. These four commands are the check:
+
+         dir /b models
+         dir /b data\preprocessed
+         dir /s /b *.h5
+         dir /b mlruns mlflow.db
+
+     Expected, and verified on a fresh clone:
+
+         models\                  best_weights.json, best_weights.pkl,
+                                  mapper.json, mapper.pkl,
+                                  tokenizer_config.json
+         data\preprocessed\       image_train.dvc, X_test_update.csv.dvc,
+                                  X_train_update.csv.dvc,
+                                  Y_train_CVw08PX.csv.dvc
+         *.h5                     nothing found
+         mlruns, mlflow.db        nothing found
+
+     The last two reporting "file not found" is the correct result, not an
+     error.
+
+     WINDOWS NOTE. If the clone fails with "Permission denied" while writing
+     a .pack file, after the download has already completed, that is
+     antivirus software holding the file open, not a network problem. Add
+     the parent folder to the exclusion list - in Norton, both to the scan
+     exclusions and to the Auto-Protect exclusions, which are two separate
+     lists - and clone again.
+
+
+-------------------------------------------------------------------------------
+3. RUN THE TESTS (OPTIONAL, 2 MINUTES, WORTH IT)
+-------------------------------------------------------------------------------
+
+     Do this before anything heavy. The suite needs no data, no containers
+     and no trained model, so it is the cheapest possible check that the
+     clone is sound - and if something here fails, nothing later will work
+     either.
+
+         python -m venv .venv-test
+         .venv-test\Scripts\activate
+         pip install -r requirements/dev.txt
+         python -m pytest tests/ -q -rs
+
+     Remember section 1.2: this environment must be Python 3.8 to 3.11.
+
+     Expected, verified on a clean 3.11 environment:
+
+         52 passed, 4 skipped in 1.56s
+
+     The four skips are correct and will not go away:
+
+         test_drift_service.py     needs Evidently
+         test_drift_detection.py   needs Evidently (x2)
+         test_dags.py              needs Airflow
+
+     Evidently and Airflow live in their own container images on purpose -
+     their dependency sets cannot share an environment with TensorFlow - so
+     a host environment never has them. requirements/dev.txt deliberately
+     leaves out TensorFlow too, which is why the suite runs in under two
+     seconds rather than pulling a 500 MB wheel.
+
+     Note that pytest reports 56 items while the repository holds 58 test
+     functions. test_drift_service.py skips at module level, so its three
+     tests are never collected and appear as a single skipped line. Nothing
+     is missing.
+
+
+-------------------------------------------------------------------------------
+4. GET THE DATA
+-------------------------------------------------------------------------------
+
+     The repository ships pointers, not data. This step turns the four .dvc
+     files into the real dataset: three CSVs and 84,916 JPEGs, about 2.4 GB,
+     plus the same again in DVC's local cache. Budget 5 GB and some patience.
+
+4.1  A VIRTUAL ENVIRONMENT FOR DVC, SEPARATE FROM EVERYTHING ELSE
+
+         python -m venv .venv-dvc
+         .venv-dvc\Scripts\activate
+         pip install "dvc==3.55.2" "pathspec==0.12.1" "dvc-s3==3.3.0"
+
+     All three pins matter.
+
+       - dvc 3.55.2 declares pathspec with no upper bound, so pip resolves
+         it to 1.x, which dropped the private _DIR_MARK that DVC's ignore
+         handling imports. Every DVC command then fails identically before
+         doing any work:
+             ERROR: unexpected error - cannot import name '_DIR_MARK'
+       - dvc-s3 is the S3 backend. Without it:
+             ERROR: s3 is supported, but requires 'dvc-s3' to be installed
+       - It must be a separate environment. dvc 3.x upgrades
+         typing_extensions past the < 4.6 that TensorFlow 2.13 pins, so it
+         can never share the training environment.
+
+     Verified: a clean install of exactly these three pulls about 110
+     packages and completes with no conflicts. In particular it installs
+     cryptography 50.x and no pyOpenSSL, which is correct - an older
+     pyOpenSSL in this environment is a leftover of some other install and
+     will break it.
+
+4.2  CREDENTIALS
+
+     The remote is DagsHub. .dvc/config ships with the repository and names
+     the remote; .dvc/config.local holds the token and is gitignored, so it
+     is NOT in your clone. You must supply your own.
+
+     Get a token: dagshub.com -> your avatar -> Your settings -> Tokens.
+
+         dvc remote modify origin --local access_key_id     <YOUR_TOKEN>
+         dvc remote modify origin --local secret_access_key <YOUR_TOKEN>
+
+     The same token goes in both fields. That is not a typo in this file;
+     it is how DagsHub's S3-compatible endpoint works.
+
+     READ THIS BEFORE YOU DEBUG ANYTHING. There is no anonymous access, not
+     even to a public repository, and an unauthenticated request is answered
+     404 rather than 401. DVC reports that as:
+
+         WARNING: Some of the cache files do not exist neither locally nor
+         on remote. Missing cache files:
+         md5: c936389910c88bb29bf2c438af3476df
+
+     That message means "you are not authenticated". It does not mean the
+     data is missing, and searching for its text leads to pages about
+     corrupted caches, which is the wrong trail entirely. Verified both
+     ways: the identical pull that produced the warning above succeeded the
+     moment credentials were added.
+
+4.3  PULL
+
+         dvc pull
+
+     To check the credentials before committing to 2.4 GB, pull one file
+     first:
+
+         dvc pull data\preprocessed\X_train_update.csv.dvc
+
+     Success looks like:
+
+         A       data\preprocessed\X_train_update.csv
+         1 file added and 1 file fetched
+
+4.4  THE TWO ENDPOINTS, AND WHY BOTH EXIST
+
+     DagsHub exposes the same store twice: as S3 (`.s3`) and over HTTP
+     (`.dvc`). Both work and both need credentials. The difference only
+     shows at scale.
+
+     Before uploading, DVC inventories what the remote already holds. An
+     HTTP remote cannot bulk-list, so that inventory becomes one request per
+     object: with 79,200 images the progress bar sits at `0/?` - no
+     denominator, because it cannot know how many remain - for hours, before
+     a single byte moves. The S3 endpoint lists with pagination.
+
+     So: S3 for pushing, either for pulling. The repository is configured
+     for S3.
+
+     If you change a remote's type in place, remove it properly first.
+     `dvc remote add` over an existing remote rewrites the url and keeps the
+     other keys, and an HTTP remote's auth/user/password are illegal for S3.
+     Every DVC command then fails with
+         ERROR: config file error: extra keys not allowed
+     including the `dvc remote remove` you would reach for, because DVC
+     validates the whole file before running anything. Delete
+     .dvc/config.local and write it again.
+
+4.5  IF YOU HAVE NO ACCESS TO THE REMOTE
+
+     The data is public at its source. Download the raw files from
+     challengedata.ens.fr/challenges/35 into data/raw, then:
+
+         python src/data/make_dataset.py data/raw data/preprocessed
+
+     You lose the guarantee that your copy is byte-identical to the one the
+     recorded MLflow runs used - which is the whole point of the pointers -
+     but the pipeline runs.
+
+
+-------------------------------------------------------------------------------
+5. BUILD THE IMAGES
+-------------------------------------------------------------------------------
+
+         docker compose build
+
+     Four images are built - api, airflow, drift, streamlit - and three are
+     pulled ready-made (mlflow, prometheus, grafana). Expect roughly ten
+     minutes on a first run, mostly installing TensorFlow into the api
+     image.
+
+     Build and start are separated on purpose. `docker compose up -d --build`
+     does both in one command and gives you one long opaque wait; two
+     commands give you a visible build and then a short start.
+
+     This step is independent of section 4, so if you have two terminals you
+     can run `dvc pull` in one and `docker compose build` in the other. They
+     are the two slow steps and nothing connects them.
+
+
+-------------------------------------------------------------------------------
+6. START THE STACK
+-------------------------------------------------------------------------------
+
+         docker compose up -d
+
+     Seven containers. The output ends like this, and the middle of it is
+     the part people misread:
+
+         Container rakuten-mlflow  Starting
+         Container rakuten-mlflow  Started
+         Container rakuten-mlflow  Waiting
+         Container rakuten-mlflow  Healthy
+         Container rakuten-api     Starting
+         ...
+         Container rakuten-grafana Started
+
+     `Waiting` is Compose holding back the services that declare
+     `depends_on: mlflow: condition: service_healthy` until MLflow answers
+     its healthcheck. On a first start, with an empty database to migrate,
+     that is a few minutes of silence. It is not a hang.
+
+6.1  WAIT, THEN CHECK
+
+         docker ps --format "{{.Names}}  {{.Status}}"
+
+     Give the API about eight minutes. It loads both Keras branches before
+     uvicorn opens the port, and until that finishes there is nothing
+     listening at all - a check against it is refused instantly rather than
+     timing out, which looks like a crash and is not one. The container's
+     start period is set to 600s for exactly this reason.
+
+     Done looks like:
+
+         rakuten-mlflow      Up 9 minutes (healthy)
+         rakuten-api         Up 8 minutes (healthy)
+         rakuten-drift       Up 8 minutes (healthy)
+         rakuten-airflow     Up 8 minutes (healthy)
+         rakuten-streamlit   Up 8 minutes (healthy)
+         rakuten-prometheus  Up 8 minutes
+         rakuten-grafana     Up 8 minutes
+
+     Prometheus and Grafana have no healthcheck, so `Up` is all they report
+     and that is correct.
+
+6.2  THE SEVEN ADDRESSES
+
+         API docs          http://localhost:8000/docs
+         Streamlit         http://localhost:8501
+         MLflow            http://localhost:5000
+         Airflow           http://localhost:8080   (admin / admin)
+         Drift service     http://localhost:8100/docs
+         Prometheus        http://localhost:9090
+         Grafana           http://localhost:3000   (admin / admin)
+
+     Open all seven once, now, rather than during a demo. If one of them
+     answers nothing while `docker ps` shows the service healthy, try
+     127.0.0.1 in place of localhost: where the host resolves localhost to
+     the IPv6 ::1 first - the default on Windows - the request can fail
+     against a server bound to IPv4. Swapping the address is the whole fix.
+
+6.3  CHECKING FROM THE COMMAND LINE
+
+         curl.exe -s -o NUL -w "api    %{http_code}\n" http://127.0.0.1:8000/health
+         curl.exe -s -o NUL -w "drift  %{http_code}\n" http://127.0.0.1:8100/docs
+         curl.exe -s -o NUL -w "mlflow %{http_code}\n" http://127.0.0.1:5000/
+         curl.exe -s -o NUL -w "air    %{http_code}\n" http://127.0.0.1:8080/
+         curl.exe -s -o NUL -w "stream %{http_code}\n" http://127.0.0.1:8501/
+         curl.exe -s -o NUL -w "graf   %{http_code}\n" http://127.0.0.1:3000/
+         curl.exe -s -o NUL -w "prom   %{http_code}\n" http://127.0.0.1:9090/
+
+     200, 302 and 404 are all fine: 302 is a redirect to a login page, and
+     404 means the service is up and simply serves nothing at `/`. The only
+     bad answer is 000, which means nothing answered at all.
+
+
+-------------------------------------------------------------------------------
+7. TRAIN ONCE - THE STEP YOU CANNOT SKIP
+-------------------------------------------------------------------------------
+
+     On a fresh clone there is no champion in the registry and no Keras
+     weights on disk, so at this point:
+
+         curl.exe -s http://127.0.0.1:8000/health
+         {"status":"ok","model_loaded":false,...}
+
+         curl.exe -s -X POST http://127.0.0.1:8000/predict/ ...
+         503  "No model is loaded"
+
+     That is the service behaving correctly, not a broken install. A missing
+     model deliberately does not stop the API from starting: it reports the
+     fact and offers the way out.
+
+7.1  TRAIN THROUGH THE API, NOT THE SCRIPT
+
+         curl.exe -X POST http://127.0.0.1:8000/training/ ^
+              -H "Content-Type: application/json" ^
+              -d "{\"samples_per_class\":15,\"val_samples_per_class\":10,\"blend_samples_per_class\":10,\"eval_samples_per_class\":10}"
+
+     Returns 202 immediately and trains in the background. Those parameters
+     are a smoke run - roughly fifteen minutes, a model that works and
+     predicts badly. Drop them for a real run, which takes hours.
+
+     Use this rather than `python src/training.py`, for three reasons:
+
+       - No Python environment needed. The api container already carries
+         TensorFlow, because it needs it to serve.
+       - MLFLOW_TRACKING_URI is already set inside the container. Run the
+         script on your host without setting it and the run is recorded in a
+         local file store that no service reads: it succeeds, prints
+         metrics, registers a version, and the API never sees the model.
+         The script now prints its destination before starting, but the
+         endpoint removes the choice entirely.
+       - When the run finishes, the endpoint reloads the champion itself.
+         No restart, no /model/reload.
+
+7.2  WATCH IT
+
+         curl.exe -s http://127.0.0.1:8000/training/status
+
+     Goes through "running" and ends at "succeeded" with the metrics, or
+     "failed" with the error. Only one run at a time; a second POST while
+     one is in flight gets 409.
+
+7.3  THEN
+
+         curl.exe -s http://127.0.0.1:8000/health
+
+     should now say:
+
+         "model_loaded":true,"model_version":"1","model_source":"mlflow-registry"
+
+
+-------------------------------------------------------------------------------
+8. WHEN THE API SERVES THE WRONG THING
+-------------------------------------------------------------------------------
+
+     Check this before a demo, every time. It is one command and it is the
+     claim the whole pipeline rests on:
+
+         curl.exe -s http://127.0.0.1:8000/health
+
+     Two values of `model_source` are possible and they mean very different
+     things:
+
+         "mlflow-registry"   the model came from the Model Registry, which
+                             is what makes the run that produced it
+                             traceable: parameters in MLflow, data version
+                             in the DVC pointers, this model in between.
+
+         "local-directory"   the registry could not be reached or the
+                             download failed, and the API fell back to
+                             whatever .h5 files happen to sit in models/.
+
+     The fallback is deliberate - serving something beats refusing to start
+     - but it is silent, and it is reached more often than you would think
+     on a small machine. Observed on a 4-CPU host: at startup the API loads
+     TensorFlow while MLflow streams ~500 MB of artifacts through its proxy,
+     the artifact server returns a 500 mid-stream, and the log says
+
+         Could not download champion artifacts:
+         ##### File model/best_vgg16_model.h5 #####
+         ("Connection broken: InvalidChunkLength(...Internal Server Error...)")
+         Model loaded from models (local-directory)
+
+     It is contention, not a bug in MLflow: the same six artifacts download
+     cleanly once the machine is idle - 3m39s instead of failing at 5m25s.
+
+     THE FIX IS ONE COMMAND, NOT A RESTART:
+
+         curl.exe -s -X POST http://127.0.0.1:8000/model/reload
+
+         {"previous_version":null,"model_version":"3",
+          "model_source":"mlflow-registry","changed":true,...}
+
+     Restarting the container would also work and costs another eight
+     minutes of loading VGG16, with the service down meanwhile. That is
+     what /model/reload exists to avoid.
+
+     The fallback is currently one-shot: if the startup download fails, the
+     API stays on the local directory until someone calls reload. On a small
+     machine, make that call part of starting the stack.

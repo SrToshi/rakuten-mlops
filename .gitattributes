@@ -1,0 +1,28 @@
+# Normalise line endings regardless of each contributor's local Git config.
+#
+# docker/airflow-entrypoint.sh and scripts/setup_dvc.sh are bash scripts that
+# run inside Linux containers or a Linux VM. If one of them is ever committed
+# with CRLF endings (which happens by default on some Windows Git setups),
+# the shebang line becomes "#!/usr/bin/env bash\r" and the container fails
+# to start with a "bad interpreter" error — a classic, hard-to-debug Windows
+# pitfall. This file makes the correct behaviour explicit instead of relying
+# on everyone's local core.autocrlf setting.
+
+* text=auto eol=lf
+
+*.sh      text eol=lf
+*.py      text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.md      text eol=lf
+*.json    text eol=lf
+*.cfg     text eol=lf
+*.toml    text eol=lf
+Dockerfile* text eol=lf
+
+# Trained model artifacts and binaries: leave untouched, never diffed as text.
+*.h5   binary
+*.pkl  binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary

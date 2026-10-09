@@ -1,0 +1,90 @@
+apiVersion: 1
+
+# Two alerts: one on the model's inputs moving away from its training data,
+# one on the monitor itself going quiet. The second matters as much as the
+# first — a drift check that stopped running looks exactly like a healthy one.
+#
+# Both alerts inform; neither acts. Grafana used to retrain through a webhook
+# on the first one, which made it a second automatic trigger competing with
+# Airflow's hourly drift check — see contact-points.yml for why that was
+# removed. The threshold below is deliberately the same 0.5 that
+# `rakuten_drift_check` tests, so what a human sees firing here is the same
+# condition the DAG acts on, read from the same metric.
+
+groups:
+  - orgId: 1
+    name: rakuten-model
+    folder: Rakuten
+    interval: 5m
+    rules:
+      - uid: rakuten-drift-threshold
+        title: Data drift above retraining threshold
+        condition: THRESHOLD
+        for: 5m
+        labels:
+          severity: warning
+          # Airflow performs the retrain; this label records what the alert
+          # means, not something Grafana routes or acts on.
+          acted_on_by: airflow
+        annotations:
+          summary: >-
+            More than half of the monitored columns have drifted. The products
+            reaching the API no longer resemble the training data.
+          runbook: >-
+            Check the Evidently report linked from /model-info, then decide
+            whether the traffic genuinely changed or the model degraded.
+        noDataState: OK
+        execErrState: OK
+        data:
+          - refId: DRIFT
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: DRIFT
+              instant: true
+              expr: rakuten_drift_share_of_drifted_columns
+          - refId: THRESHOLD
+            datasourceUid: __expr__
+            model:
+              refId: THRESHOLD
+              type: threshold
+              expression: DRIFT
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0.5]
+
+      - uid: rakuten-drift-stale
+        title: Drift monitor has stopped reporting
+        condition: THRESHOLD
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            No drift report in over 24 hours. The monitoring job is probably
+            not running, which means drift would go unnoticed.
+        noDataState: NoData
+        execErrState: Error
+        data:
+          - refId: AGE
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: AGE
+              instant: true
+              expr: rakuten_drift_report_age_seconds
+          - refId: THRESHOLD
+            datasourceUid: __expr__
+            model:
+              refId: THRESHOLD
+              type: threshold
+              expression: AGE
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [86400]

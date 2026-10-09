@@ -1,0 +1,48 @@
+FROM apache/airflow:2.10.5-python3.10
+
+# The DAGs only need an HTTP client, which the base image already has. This
+# image deliberately installs no TensorFlow, no Evidently and no MLflow
+# server: Airflow decides WHEN things run, the services decide HOW, and
+# keeping it that way is what stops this image from re-creating the
+# dependency conflict that split the project into services.
+
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+COPY docker/airflow-entrypoint.sh /usr/local/bin/airflow-entrypoint.sh
+RUN chmod +x /usr/local/bin/airflow-entrypoint.sh
+
+# A home for the SQLite metadata database, outside the container's own
+# filesystem. docker-compose.yml mounts a named volume here and points
+# AIRFLOW__DATABASE__SQL_ALCHEMY_CONN at it.
+#
+# Without this, the database lives at /opt/airflow/airflow.db inside the
+# container, so every `docker compose up --build` recreates the container
+# and destroys it: Airflow re-runs its migrations, re-creates several
+# hundred Flask-AppBuilder permission rows (the "Added Permission ..." wall
+# in the logs), and — the part that matters for a demo — loses every DAG run
+# in its history and resets the DAGs to paused.
+#
+# The directory is created here, owned by the airflow user, because Docker
+# seeds an empty named volume from the image path including its ownership.
+# Created at mount time instead, it would belong to root and Airflow could
+# not write to it.
+RUN mkdir -p /opt/airflow/db && chown airflow:root /opt/airflow/db
+
+USER airflow
+
+ENV PYTHONUNBUFFERED=1
+EXPOSE 8080
+
+# The webserver's first boot syncs Flask-AppBuilder's permission tables
+# before it serves anything (see the master timeout in docker-compose.yml).
+# On a loaded two-core host that runs well past the old 120s, so the
+# container spent its whole startup marked unhealthy.
+#
+# 127.0.0.1 rather than localhost, for the same reason as the API: the
+# server listens on IPv4, and an IPv6-first resolution is refused.
+HEALTHCHECK --interval=30s --timeout=30s --start-period=420s --retries=6 \
+    CMD curl -fsS http://127.0.0.1:8080/health || exit 1
+
+ENTRYPOINT ["/usr/local/bin/airflow-entrypoint.sh"]

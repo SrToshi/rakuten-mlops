@@ -1,0 +1,38 @@
+apiVersion: 1
+
+# No contact points, on purpose — and an explicit delete, also on purpose.
+#
+# This file used to define a webhook pointed at http://api:8000/training/, so
+# that the drift alert retrained the model by itself. That predates Airflow.
+# Now `rakuten_drift_check` runs hourly, asks the drift service for a verdict
+# and triggers `rakuten_training` when it crosses the threshold — so the
+# webhook was a SECOND, independent trigger for the same thing, on a different
+# schedule, firing whether or not the DAGs were even unpaused.
+#
+# Two automatic triggers for one action is not redundancy, it is ambiguity:
+# when a run starts, nothing tells you which of them started it. The /training/
+# lock meant they could not overlap, but the lock hid the problem rather than
+# solving it. Airflow is the single automated path now.
+#
+# Why the delete blocks below, rather than just removing the definition:
+# Grafana's alerting provisioning is ADDITIVE. Dropping a contact point from
+# this file leaves the one already written to Grafana's database untouched —
+# and that database lives in the `grafana-data` volume, which survives
+# `docker compose down`. On any stack that ran the old config even once, the
+# webhook would keep firing from a file that no longer mentions it. The two
+# blocks below are what actually removes it: `uid` is the receiver's uid, and
+# resetPolicies puts the notification tree back to Grafana's default so
+# nothing routes to it either.
+#
+# The alert rules in rules.yml stay exactly as they were. They are what a
+# human looks at; with no contact point provisioned, Grafana routes them to
+# its own built-in default, nothing is configured to deliver those anywhere
+# (there is no SMTP in this stack), and that is the intent: the alerts are
+# visible in the Alerting UI and on the dashboards, and they call nothing.
+
+deleteContactPoints:
+  - orgId: 1
+    uid: rakuten-retrain
+
+resetPolicies:
+  - 1

@@ -1,0 +1,29 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements/drift.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY src/db.py src/drift_detection.py src/drift_service.py src/mlflow_utils.py ./src/
+
+ENV PYTHONPATH=/app/src \
+    PYTHONUNBUFFERED=1
+
+EXPOSE 8100
+
+# 127.0.0.1 rather than localhost: the server listens on IPv4 only, and a
+# host that resolves localhost to ::1 first would be refused instantly.
+# This service is light and was never marked unhealthy, but there is no
+# reason to leave the same trap armed in one of the four images.
+HEALTHCHECK --interval=30s --timeout=15s --start-period=60s --retries=4 \
+    CMD curl -fsS http://127.0.0.1:8100/health || exit 1
+
+# A service rather than a sleep loop: Airflow owns the schedule now, and a
+# DAG needs something it can call. The batch script is still runnable by hand
+# (python src/drift_detection.py) for a one-off check.
+CMD ["uvicorn", "drift_service:app", "--host", "0.0.0.0", "--port", "8100", "--app-dir", "src"]

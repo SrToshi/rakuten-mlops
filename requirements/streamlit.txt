@@ -1,0 +1,12 @@
+# Front end. Talks to the API over HTTP only — no model, no TensorFlow,
+# which is what keeps this image small and the UI unable to drift away from
+# what the API actually serves.
+#
+# numpy is pinned below 2 on purpose. Streamlit does not constrain it, so pip
+# otherwise installs numpy 2.x next to pandas 2.0.3 — and pandas only gained
+# numpy 2 support in 2.2.2, so the pair fails at import with a binary
+# incompatibility error.
+streamlit==1.39.0
+pandas==2.0.3
+numpy==1.26.4
+requests==2.32.3
